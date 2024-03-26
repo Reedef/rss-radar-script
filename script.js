@@ -34,6 +34,7 @@
 // @run-at     document-idle
 // ==/UserScript==
 
+// ========== i18n ===========
 const zhcn = {
   "no_title": "无名称",
   "copied": "已复制",
@@ -134,7 +135,7 @@ const ja = {
   "disabled": "無効にしました",
   "close": "閉じる"
 };
-var languages = {
+let languages = {
   "zh": zhcn,
   "zhcn": zhcn,
   "zhtw": zhtw,
@@ -142,19 +143,80 @@ var languages = {
   "en": en
 };
 
-var lang = navigator.language.replace('-', "").toLowerCase();
+let lang = navigator.language.replace('-', "").toLowerCase();
 lang = languages[lang];
 if (!lang) {
   lang = languages.en;
 }
+// ========== i18n ===========
 
+// ========== utils ===========
+function toArray(arrayLikeObj) {
+  return Array.prototype.slice.call(arrayLikeObj);
+}
+
+function setAttributes(element, attributes) {
+  if (!element) return;
+  for (let key in attributes) {
+    element.setAttribute(key, attributes[key]);
+  }
+}
+
+function createElement(tagName, attributes = {}) {
+  const element = document.createElement(tagName);
+  setAttributes(element, attributes);
+  return element;
+}
+
+function notification(size) {
+  GM_notification({
+    title: lang.found + " " + size + " " + lang.feed,
+    text: lang.click_the_number_to_view,
+    timeout: 3000
+  });
+}
+
+function copy(str) {
+  GM_setClipboard(str);
+  GM_notification({
+    text: lang.copied + ": " + str,
+    title: lang.copy_succeeded,
+    timeout: 2000
+  });
+}
+
+function isValidUrl(url) {
+  return /https?:\/\/.*/.test(url);
+}
+
+function logger(){
+  console.log.apply(null, ['[RSS Radar]', ...arguments])
+}
+
+async function checkIsRSSUrl(url){
+  const response = await GM.xmlHttpRequest({
+    method: "HEAD",
+    url
+  }).catch(e => {});
+  return response?.status === 200 && /content-type:.*?(application\/.*xml)/.test(response?.responseHeaders);
+}
+
+// ========== utils ===========
+
+// ========== Script Start ===========
+
+let feedsList = [];
+let countLabels;
+let feedsView;
+let rssPlusDocument;
+let rssPlusDiv;
 
 setTimeout(function () {
   GM_registerMenuCommand(lang.use_feedly, function () {
     GM_setValue("rss_service", "feedly");
   });
   GM_registerMenuCommand(lang.use_inoreader, function () {
-    var domain = GM_getValue("inoreader_domain");
+    let domain = GM_getValue("inoreader_domain");
     if (!domain) {
       domain = "https://www.inoreader.com";
     }
@@ -167,7 +229,7 @@ setTimeout(function () {
     }
   });
   GM_registerMenuCommand(lang.use_tinytinyrss, function () {
-    var domain = GM_getValue("tinytinyrss_domain");
+    let domain = GM_getValue("tinytinyrss_domain");
     if (!domain) {
       domain = "https://www.example.com";
     }
@@ -180,7 +242,7 @@ setTimeout(function () {
     }
   });
   GM_registerMenuCommand(lang.use_freshrss, function () {
-    var domain = GM_getValue("freshrss_domain");
+    let domain = GM_getValue("freshrss_domain");
     if (!domain) {
       domain = "https://www.example.com";
     }
@@ -193,7 +255,7 @@ setTimeout(function () {
     }
   });
   GM_registerMenuCommand(lang.use_miniflux, function () {
-    var domain = GM_getValue("miniflux_domain");
+    let domain = GM_getValue("miniflux_domain");
     if (!domain) {
       domain = "https://www.example.com";
     }
@@ -217,7 +279,7 @@ setTimeout(function () {
 
 
   GM_registerMenuCommand(lang.setting_rsshub_domain, function () {
-    var domain = GM_getValue("rsshub_domain");
+    let domain = GM_getValue("rsshub_domain");
     if (!domain) {
       domain = "https://rsshub.app";
     }
@@ -233,285 +295,9 @@ setTimeout(function () {
   findRSS();
 }, 0);
 
-
-var feedsMap = new Map();
-
-
-function clearRSS() {
-  if (rssPlusDiv) {
-    rssPlusDiv.remove();
-  }
-  feedsMap = new Map();
-}
-
-
-function findRSS() {
-  clearRSS();
-  getKnowFeeds();
-  getUnknownFeeds();
-  findCloudFeeds(optimizeLink(location.href), document.documentElement.outerHTML);
-}
-
-
-// 获取在<head>的<link>元素中，已经声明为RSS的链接
-function getKnowFeeds() {
-  var links = document.getElementsByTagName("link");
-  var link, linkHref, linkType, linkTitle;
-  for (var i = 0, l = links.length; i < l; i++) {
-    link = links[i];
-    if (!link) continue;
-    linkHref = link.href;
-    linkType = link.type;
-    linkTitle = link.title;
-    if (!linkTitle) {
-      linkTitle = document.title;
-    }
-    if (linkType && linkType.match(/.+\/(rss|rdf|atom)/i)) {
-      addRSS(linkTitle, linkHref);
-    } else if (linkType && linkType.match(/^text\/xml$/i)) {
-      addRSS(linkTitle, linkHref);
-    }
-  }
-}
-
-
-function toArray(arrayLikeObj){
-  return Array.prototype.slice.call(arrayLikeObj);
-}
-
-// 寻找未明确标示的RSS源
-function getUnknownFeeds() {
-  let links = toArray(document.getElementsByTagName("a"));
-  links.forEach((link) => {
-    const linkhref = link.href;
-    if(/([/=](rss|feed|atom)|(feed|rss|atom)[=/]|feeds\.feedburner\.com\/|\.(xml|rdf)($|\?)|^(rss|feed):\/\/)/.test(linkhref)){
-      const linktitle = link.title || document.title || link.innerText;
-      addRSS(linktitle, linkhref);
-    }
-  });
-
-  checkFeed(location.protocol + '//' + location.host);
-}
-
-function findCloudFeeds(url, res) {
-  return function (jsStr, url, res) {
-    try {
-      if (!jsStr) {
-        showWithCloudFeeds(url);
-        return;
-      }
-      const Ruler = looseJsonParse(jsStr);
-
-      var list = Ruler.find(url, res);
-      if (!list) {
-        return;
-      }
-      list.forEach(element => {
-        addRSS(element.title, element.link);
-      });
-    } catch (e) {
-      showWithCloudFeeds(url);
-    }
-  }.call(window, GM_getResourceText('RulerJs'), url, res);
-}
-
-function showWithCloudFeeds(url) {
-  console.log("请求远程：" + url);
-  GM_xmlhttpRequest({
-    method: "get",
-    url: "https://rssplus.vercel.app/api/find.js?url=" + encodeURIComponent(url), // https://rssplus.vercel.app/api/find.js，https://rssfinder.vercel.app/find.php
-    onload: response => {
-      if (response.status != 200) {
-        return;
-      }
-
-      var obj = JSON.parse(response.responseText);
-
-      if (!obj) {
-        return;
-      }
-      obj.forEach(element => {
-        addRSS(element.title, element.link);
-      });
-    }
-  });
-}
-
-function looseJsonParse(obj) {
-  return Function('"use strict";return (' + obj + ')')();
-}
-
-function checkFeed(href) {
-  // TODO 缓存无记录网站，不要每次重复检测
-  ['/feed', '/rss', '/rss.xml', '/atom.xml', '/feed.xml', '/?feed=rss2', '/?feed=rss'].forEach(suffix => {
-    console.log('RSS+ checkFeed:', href + suffix);
-    GM_xmlhttpRequest({
-      method: "HEAD",
-      url: href + suffix,
-      onload: response => {
-        // console.log("请求api返回状态：" + response.status + " => " + href + flag);
-        // console.log('RSS+ checkFeed Result:', response);
-        if (response.status == 200 && /content-type:.*?(application\/xml)/.test(response.responseHeaders)) {
-          console.log('checkFeed >>', response);
-          addRSS(document.title, href + suffix);
-        }
-      }
-    });
-  });
-}
-
-function optimizeLink(link) {
-  if (link.match(/douban\.com\/people/i)) {
-    var src = document.querySelector("#profile > div > div.bd > div.basic-info > div.uhead-wrap > img.userface").src;
-    var m = src.match(/ul(\d+)-/i);
-    link = "https://www.douban.com/people/" + m[1];
-  }
-  return link;
-}
-
-var feedsBadge;
-var feedsDialog;
-var countLabels;
-var feedsView;
-var rssPlusDocument;
-var rssPlusDiv;
-
-function addRSS(title, link) {
-  if (link.match(/(api\.wizos\.me)|(feedly\.com\/i\/subscription)|(inoreader\.com\/feed\/http)/i)) {
-    return;
-  }
-
-  if (Object.keys(feedsMap).length == 0) {
-    // 安装 RSS Plus Box 和 RSS Plus Frame
-    console.log("RSSPlus：首次渲染");
-    var body = document.getElementsByTagName("body");
-    if (body && body[0]) body = body[0];
-
-    var rssPlusStyle = document.createElement("style");
-    rssPlusStyle.innerHTML = '@media print {#rss-plus {display: none;}} #rss-plus{position:fixed;bottom:60px;right:5px;z-index:9999;width:auto;height:auto;} #rss-plus > iframe{display: block!important; max-width: 100%!important;border:0px;margin:0px !important; }';
-    body.appendChild(rssPlusStyle);
-
-    rssPlusDiv = document.createElement("div");
-    rssPlusDiv.setAttribute("id", "rss-plus");
-    body.appendChild(rssPlusDiv);
-
-    var rssPlusIFrame = document.createElement("iframe");
-    rssPlusIFrame.setAttribute("id", "rss-plus-iframe");
-    rssPlusIFrame.setAttribute("name", "rssPlusEnvironment");
-    rssPlusIFrame.setAttribute("allowTransparency", "true");
-
-    if (navigator.userAgent.indexOf("Firefox") !== -1) {
-      rssPlusIFrame.setAttribute("src", "javascript:");
-    }
-    rssPlusDiv.appendChild(rssPlusIFrame);
-
-
-    rssPlusDocument = rssPlusEnvironment.window.document;
-    var frameBody = rssPlusDocument.getElementsByTagName("body");
-    if (frameBody && frameBody[0]) frameBody = frameBody[0];
-
-
-    var styleEl = document.createElement("style");
-    styleEl.innerHTML = BOX_STYLE;
-    frameBody.appendChild(styleEl);
-
-    var rssPlusBoxDiv = document.createElement("div");
-    rssPlusBoxDiv.setAttribute("id", "rss-plus-box");
-    rssPlusBoxDiv.innerHTML = '<div id="rp-feeds-badge" class="rp-card rp-card-bordered"><span class="rp-badge-count rp-feed-count" place="count">0</span></div>'
-      + '<div id="rp-feeds-dialog" class="rp-card rp-card-bordered"><div class="rp-table"><table cellspacing="0" cellpadding="0" border="0"><colgroup><col width="70%"><col width="30%"></colgroup><tbody id="rp-table-tbody">'
-      + '<tr><th><div id="rp-card-head" class="rp-card-head"><div class="card-title">' + ICON_LOGO + lang.found + '<span class="rp-mark-count rp-feed-count" place="count"></span>' + lang.feed + ' -【RSS+】</div></div></th><th class="rp-table-column-end"><button type="button" id="rp-close-btn" class="rp-btn rp-btn-small endrp-btn-dashed" title="' + lang.close + '"><span>' + ICON_CLOSE + '</span></button></th></tr>'
-      + "</tbody></table></div></div>";
-    frameBody.appendChild(rssPlusBoxDiv);
-
-    feedsBadge = rssPlusDocument.getElementById("rp-feeds-badge");
-    feedsDialog = rssPlusDocument.getElementById("rp-feeds-dialog");
-
-    countLabels = rssPlusDocument.getElementsByClassName("rp-feed-count");
-    feedsView = rssPlusDocument.getElementById("rp-table-tbody");
-
-    rssPlusIFrame.style.width = feedsBadge.offsetWidth + "px";
-    rssPlusIFrame.style.height = feedsBadge.offsetHeight + "px";
-
-    addEventHandler(rssPlusDocument.getElementById("rp-close-btn"), "click", function () {
-      feedsDialog.style.display = "none";
-      feedsBadge.style.display = "block";
-      rssPlusIFrame.style.width = feedsBadge.offsetWidth + "px";
-      rssPlusIFrame.style.height = feedsBadge.offsetHeight + "px";
-    });
-    addEventHandler(rssPlusDocument.getElementById("rp-feeds-badge"), "click", function () {
-      if (Object.keys(feedsMap).length == 0) {
-        return
-      }
-      feedsDialog.style.display = "block";
-      feedsBadge.style.display = "none";
-
-      if (document.body.clientWidth < 600) {
-        feedsDialog.style.width = "100%";
-        rssPlusIFrame.style.width = "100%";
-      } else {
-        rssPlusIFrame.style.width = rssPlusDocument.getElementById("rss-plus-box").offsetWidth + "px";
-
-      }
-      rssPlusIFrame.style.height = rssPlusDocument.getElementById("rss-plus-box").offsetHeight + "px";
-    });
-
-  }
-
-  //link = link.replace(/\/$/g, "");
-
-  // 防止重复，如果能查找到，证明数组元素重复了
-  if (!feedsMap[link.toLowerCase()]) {
-    feedsMap[link.toLowerCase()] = 1;
-  } else {
-    return;
-  }
-
-  console.log("发现：" + title + " -> " + link);
-
-  Array.from(countLabels).forEach(label => label.innerText = Object.keys(feedsMap).length);
-
-  if (link.match(/^https*:\/\/rsshub.app/)) {
-    var rsshub_domain = GM_getValue("rsshub_domain");
-    if (rsshub_domain != null && rsshub_domain != "") {
-      link = link.replace(/^https*:\/\/rsshub.app/, rsshub_domain);
-    }
-  }
-  if (!title) {
-    title = lang.no_title;
-  }
-
-  var item = document.createElement("tr");
-  feedsView.appendChild(item);
-
-  item.innerHTML
-    = '<td><div class="rp-table-cell"><div class="feed-title">' + title + '</div><div class="feed-tips"><a class="feed-link" href="' + link + '" target="_blank">' + link + '</a></div></div></td>'
-    + '<td class="rp-table-column-end">'
-    + '<button type="button" class="rp-btn rp-btn-primary rp-btn-small rp-copy-feed-link"><span>' + lang.copy + '</span></button>'
-    + '<button type="button" class="rp-btn rp-btn-primary rp-btn-small rp-follow-feed-link"><span>' + lang.follow + '</span></button></td>';
-
-  var copyFeedLinkButton = item.getElementsByClassName("rp-copy-feed-link")[0];
-  addEventHandler(copyFeedLinkButton, "click", function () {
-    copy(link);
-  });
-
-  var followFeedLinkButton = item.getElementsByClassName("rp-follow-feed-link")[0];
-  addEventHandler(followFeedLinkButton, "click", function () {
-    follow(link); // .replace(/&/g,"%26") 转义&避免RSS链接识别错误
-  });
-
-  var feedLinkButton = item.getElementsByClassName("feed-link")[0];
-  new HoverImgFx2(feedLinkButton);
-}
-
-
-function isValidUrl(url) {
-  if (url && (url.match(/^https*:\/\/.*?\.\w+(:\d+)?(\/|$)/) || url.match(/^https*:\/\/\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(\:\d+)*(:\d+)?(\/|$)/))) {
-    return true;
-  } else {
-    return false;
-  }
-}
-
+/**
+ * bind url change listener
+ */
 function initUrlChangeListener() {
   const _historyWrap = function (type) {
     const orig = history[type];
@@ -540,36 +326,113 @@ function initUrlChangeListener() {
   }, false);
 }
 
-function addEventHandler(target, eventName, eventHandler, scope) {
-  var f = scope ? function () {
-    eventHandler.apply(scope, arguments);
-  } : eventHandler;
-  if (target.addEventListener) {
-    target.addEventListener(eventName, f, true);
-  } else if (target.attachEvent) {
-    target.attachEvent("on" + eventName, f);
+function clearRSS() {
+  if (rssPlusDiv) {
+    logger(rssPlusDiv);
+    rssPlusDiv.remove();
+    rssPlusDiv = null;
   }
-  return f;
+  feedsList = [];
+}
+
+async function findRSS() {
+  logger('Search RSS...')
+  clearRSS();
+  getOfficialFeeds();
+  await checkDefaultPath();
+  await getFeedsFromHyperLink();
+  findCloudFeeds(location.href, document.documentElement.outerHTML);
+}
+
+// 获取在<head>的<link>元素中，已经声明为RSS的链接
+function getOfficialFeeds() {
+  const links = toArray(document.querySelectorAll('link[href]'));
+  links.forEach((link) => {
+    const linkType = link.type;
+    if (linkType && /.+\/(rss|rdf|atom|feed|xml)/i.test(linkType)) {
+      addRSS(link.title || document.title, link.href, 'official');
+    }
+  })
+}
+
+// 寻找未明确标示的RSS源
+async function getFeedsFromHyperLink() {
+  let links = toArray(document.getElementsByTagName("a"));
+  for (const link of links){
+    const linkhref = link.href;
+    if(/([?&/=](feed|rss|atom)($|[=/?]|\.(xml|rdf)($|\?))|feeds\.feedburner\.com\/|\.(xml|rdf)($|\?)|^(rss|feed):\/\/)/i.test(linkhref)){
+      const isRssUrl = await checkIsRSSUrl();
+      if(isRssUrl){
+        const linkTitle = link.title || document.title || link.innerText;
+        addRSS(linkTitle, linkhref, 'hyperlink');
+      }
+    }
+  }
+}
+
+async function checkDefaultPath(href = `${SITE_PROTOCOL}//${location.host}`) {
+  // TODO 缓存无记录网站，不要每次重复检测
+  const targets = ['/atom.xml', '/feed', '/feed.xml', '/rss', '/rss.xml', '/?feed=rss2', '/?feed=rss'];
+  for (const path of targets) {
+    logger('check default path:', href + path);
+    const url = href + path;
+    const isRssUrl = await checkIsRSSUrl(url)
+    if(isRssUrl){
+      addRSS(document.title, href + path, 'default');
+      break;
+    }
+  }
 }
 
 
-function notification(size) {
-  GM_notification({
-    title: lang.found + " " + size + " " + lang.feed,
-    text: lang.click_the_number_to_view,
-    timeout: 3000
+function findCloudFeeds(url, res) {
+  return function (jsStr, url, res) {
+    try {
+      if (!jsStr) {
+        showWithCloudFeeds(url);
+        return;
+      }
+      const Ruler = looseJsonParse(jsStr);
+
+      let list = Ruler.find(url, res);
+      if (!list) {
+        return;
+      }
+      list.forEach(element => {
+        addRSS(element.title, element.link, 'cloud-rules');
+      });
+    } catch (e) {
+      showWithCloudFeeds(url);
+    }
+  }.call(window, GM_getResourceText('RulerJs'), url, res);
+}
+
+function showWithCloudFeeds(url) {
+  logger("请求远程：" + url);
+  GM_xmlhttpRequest({
+    method: "get",
+    url: "https://rssplus.vercel.app/api/find.js?url=" + encodeURIComponent(url), // https://rssplus.vercel.app/api/find.js，https://rssfinder.vercel.app/find.php
+    onload: response => {
+      if (response.status != 200) {
+        return;
+      }
+
+      let obj = JSON.parse(response.responseText);
+
+      if (!obj) {
+        return;
+      }
+      obj.forEach(element => {
+        addRSS(element.title, element.link, 'cloud-rules2');
+      });
+    }
   });
 }
 
-
-function copy(str) {
-  GM_setClipboard(str);
-  GM_notification({
-    text: lang.copied + ": " + str,
-    title: lang.copy_succeeded,
-    timeout: 2000
-  });
+function looseJsonParse(obj) {
+  return Function('"use strict";return (' + obj + ')')();
 }
+
 
 function follow(link) {
   const rssService = GM_getValue("rss_service", "feedly");
@@ -596,6 +459,155 @@ function follow(link) {
   // [miniflux] https://example.com/bookmarklet?uri=https%3A%2F%2Fxinquji.com%2Ftopics%2F313
 }
 
+// function optimizeLink(link) {
+//   if (link.match(/douban\.com\/people/i)) {
+//     let src = document.querySelector("#profile > div > div.bd > div.basic-info > div.uhead-wrap > img.userface").src;
+//     let m = src.match(/ul(\d+)-/i);
+//     link = "https://www.douban.com/people/" + m[1];
+//   }
+//   return link;
+// }
+
+const SITE_PROTOCOL = location.protocol;
+function addRSS(title, link, source) {
+  if (link.match(/(api\.wizos\.me)|(feedly\.com\/i\/subscription)|(inoreader\.com\/feed\/http)/i)) {
+    return;
+  }
+
+  if (feedsList.length === 0 && !rssPlusDiv) {
+    // 安装 RSS Plus Box 和 RSS Plus Frame
+    logger("首次渲染", source);
+    const body = document.body;
+
+    const rssPlusStyle = document.createElement("style");
+    rssPlusStyle.innerHTML = '@media print {#rss-plus {display: none;}} #rss-plus{position:fixed;bottom:60px;right:5px;z-index:9999;width:auto;height:auto;} #rss-plus > iframe{display: block!important; max-width: 100%!important;border:0px;margin:0px !important; }';
+    body.appendChild(rssPlusStyle);
+
+    rssPlusDiv = createElement('div', {id: 'rss-plus'});
+    // Create iFrame Element that wraps the whole
+    const rssPlusIFrame = document.createElement("iframe");
+    setAttributes(rssPlusIFrame, {
+      id: 'rss-plus-iframe',
+      name: 'rssPlusEnvironment',
+      allowTransparency: 'true',
+      src: navigator.userAgent.indexOf("Firefox") !== -1 ? 'javascript:' : undefined
+    })
+    rssPlusDiv.appendChild(rssPlusIFrame);
+    body.appendChild(rssPlusDiv);
+
+    // Get iFrame Document
+    rssPlusDocument = rssPlusEnvironment.window.document;
+    const frameBody = rssPlusDocument.body;
+
+    // Write main DOM into iFrame
+    const styleEl = createElement('style');
+    styleEl.innerHTML = BOX_STYLE;
+    frameBody.appendChild(styleEl);
+
+    const rssPlusBoxDiv = createElement('div', {id: 'rss-plus-box'});
+    rssPlusBoxDiv.innerHTML = '<div id="rp-feeds-badge" class="rp-card rp-card-bordered"><span class="rp-badge-count rp-feed-count" place="count">0</span></div>'
+      + '<div id="rp-feeds-dialog" class="rp-card rp-card-bordered"><div class="rp-table"><table cellspacing="0" cellpadding="0" border="0"><colgroup><col width="70%"><col width="30%"></colgroup><tbody id="rp-table-tbody">'
+      + '<tr><th><div id="rp-card-head" class="rp-card-head"><div class="card-title">' + ICON_LOGO + lang.found + '<span class="rp-mark-count rp-feed-count" place="count"></span>' + lang.feed + ' -【RSS+】</div></div></th><th class="rp-table-column-end"><button type="button" id="rp-close-btn" class="rp-btn rp-btn-small endrp-btn-dashed" title="' + lang.close + '"><span>' + ICON_CLOSE + '</span></button></th></tr>'
+      + "</tbody></table></div></div>";
+    frameBody.appendChild(rssPlusBoxDiv);
+
+    const feedsBadge = rssPlusDocument.getElementById("rp-feeds-badge");
+    const feedsDialog = rssPlusDocument.getElementById("rp-feeds-dialog");
+    const closeBtn = rssPlusDocument.getElementById("rp-close-btn");
+    countLabels = rssPlusDocument.getElementsByClassName("rp-feed-count");
+    feedsView = rssPlusDocument.getElementById("rp-table-tbody");
+
+    rssPlusIFrame.style.width = feedsBadge.offsetWidth + "px";
+    rssPlusIFrame.style.height = feedsBadge.offsetHeight + "px";
+
+    addEventHandler(closeBtn, "click", function () {
+      feedsDialog.style.display = "none";
+      feedsBadge.style.display = "block";
+      rssPlusIFrame.style.width = feedsBadge.offsetWidth + "px";
+      rssPlusIFrame.style.height = feedsBadge.offsetHeight + "px";
+    });
+    addEventHandler(feedsBadge, "click", function () {
+      if (feedsList.length === 0) {
+        return
+      }
+      feedsDialog.style.display = "block";
+      feedsBadge.style.display = "none";
+
+      if (document.body.clientWidth < 600) {
+        feedsDialog.style.width = "100%";
+        rssPlusIFrame.style.width = "100%";
+      } else {
+        rssPlusIFrame.style.width = rssPlusDocument.getElementById("rss-plus-box").offsetWidth + "px";
+
+      }
+      rssPlusIFrame.style.height = rssPlusDocument.getElementById("rss-plus-box").offsetHeight + "px";
+    });
+  }
+
+  // 防止重复，如果能查找到，证明数组元素重复了
+  link = link.replace(/https?:/, SITE_PROTOCOL).toLowerCase();
+  if (feedsList.includes(link)) {
+    return;
+  }
+  feedsList.push(link);
+
+
+  title = title || lang.no_title;
+  logger("发现：" + title + " -> " + link);
+
+  Array.from(countLabels).forEach(label => label.innerText = feedsList.length);
+
+  // Replace public RssHub service with self-hosted domain
+  if (link.match(/^https*:\/\/rsshub.app/)) {
+    let rsshub_domain = GM_getValue("rsshub_domain");
+    if (rsshub_domain != null && rsshub_domain != "") {
+      link = link.replace(/^https*:\/\/rsshub.app/, rsshub_domain);
+    }
+  }
+
+  const item = createElement('tr');
+  feedsView.appendChild(item);
+
+  item.innerHTML = `
+    <td>
+      <div class="rp-table-cell">
+        <div class="feed-title">${title}<span>(${source})</span></div>
+        <div class="feed-tips"><a class="feed-link" href="${link}" target="_blank">${link}</a></div>
+      </div>
+    </td>
+    <td class="rp-table-column-end">
+      <button type="button" class="rp-btn rp-btn-primary rp-btn-small rp-copy-feed-link"><span>${lang.copy}</span></button>
+      <button type="button" class="rp-btn rp-btn-primary rp-btn-small rp-follow-feed-link"><span>${lang.follow}</span></button>
+    </td>
+  `;
+
+  let copyFeedLinkButton = item.getElementsByClassName("rp-copy-feed-link")[0];
+  addEventHandler(copyFeedLinkButton, "click", function () {
+    copy(link);
+  });
+
+  let followFeedLinkButton = item.getElementsByClassName("rp-follow-feed-link")[0];
+  addEventHandler(followFeedLinkButton, "click", function () {
+    follow(link); // .replace(/&/g,"%26") 转义&避免RSS链接识别错误
+  });
+
+  let feedLinkButton = item.getElementsByClassName("feed-link")[0];
+  new HoverImgFx2(feedLinkButton);
+}
+
+
+function addEventHandler(target, eventName, eventHandler, scope) {
+  let f = scope ? function () {
+    eventHandler.apply(scope, arguments);
+  } : eventHandler;
+  if (target.addEventListener) {
+    target.addEventListener(eventName, f, true);
+  } else if (target.attachEvent) {
+    target.attachEvent("on" + eventName, f);
+  }
+  return f;
+}
+
 
 const getMousePos = (e) => {
   let posx = 0;
@@ -618,7 +630,7 @@ class HoverImgFx2 {
     this.DOM.reveal = document.createElement('div');
     this.DOM.reveal.className = 'hover-reveal';
 
-    var qr = qrcode(4, 'L');
+    let qr = qrcode(4, 'L');
     qr.addData(this.DOM.el.href);
     qr.make();
     let url = qr.createDataURL();
